@@ -44,7 +44,7 @@ pub(super) fn enter_mount_namespace() -> Result<()> {
 
 pub(super) fn mount_resources(manifest: &Manifest) -> Result<()> {
     for mount in &manifest.mounts {
-        bind_mount(&manifest.root, mount)?;
+        bind_mount(&manifest.root, mount, manifest.uid, manifest.gid)?;
     }
     Ok(())
 }
@@ -80,7 +80,7 @@ pub(super) fn create_device_nodes(uid: u32, gid: u32) -> Result<()> {
     Ok(())
 }
 
-fn bind_mount(root: &Path, mount: &Mount) -> Result<()> {
+fn bind_mount(root: &Path, mount: &Mount, uid: u32, gid: u32) -> Result<()> {
     let source_meta = fs::symlink_metadata(&mount.source)
         .with_context(|| format!("stat mount source {}", mount.source.display()))?;
     if source_meta.file_type().is_symlink() {
@@ -115,6 +115,13 @@ fn bind_mount(root: &Path, mount: &Mount) -> Result<()> {
         0
     };
     mount_call(Some(&source), &destination, libc::MS_BIND | recursive)?;
+    grant_vmm_access(
+        &destination,
+        source_meta.is_dir(),
+        mount.read_only,
+        uid,
+        gid,
+    )?;
     if mount.read_only {
         mount_call(
             None,
@@ -123,6 +130,53 @@ fn bind_mount(root: &Path, mount: &Mount) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+// Mounted artifacts are private to this machine but arrive from machined as
+// root-owned 0600 files. Cloud Hypervisor executes as the unprivileged jail
+// identity, so establish that identity's least-privilege access before a
+// read-only mount is remounted and before privileges are dropped. A bind mount
+// shares inode metadata with its source; this is safe because manifest sources
+// are per-machine staged artifacts below machined's private artifact root.
+fn grant_vmm_access(
+    destination: &Path,
+    is_directory: bool,
+    read_only: bool,
+    uid: u32,
+    gid: u32,
+) -> Result<()> {
+    if is_directory {
+        for entry in fs::read_dir(destination)
+            .with_context(|| format!("read mounted directory {}", destination.display()))?
+        {
+            let entry = entry
+                .with_context(|| format!("read mounted directory {}", destination.display()))?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)
+                .with_context(|| format!("stat mounted path {}", path.display()))?;
+            if metadata.file_type().is_symlink() {
+                bail!(
+                    "mounted artifact must not contain symlink: {}",
+                    path.display()
+                );
+            }
+            grant_vmm_access(&path, metadata.is_dir(), read_only, uid, gid)?;
+        }
+    }
+    chown_path(destination, uid, gid)
+        .with_context(|| format!("chown mounted artifact {}", destination.display()))?;
+    let mode = artifact_mode(is_directory, read_only);
+    fs::set_permissions(destination, fs::Permissions::from_mode(mode))
+        .with_context(|| format!("chmod mounted artifact {}", destination.display()))
+}
+
+const fn artifact_mode(is_directory: bool, read_only: bool) -> u32 {
+    match (is_directory, read_only) {
+        (true, true) => 0o500,
+        (true, false) => 0o700,
+        (false, true) => 0o400,
+        (false, false) => 0o600,
+    }
 }
 
 fn create_character_device(path: &Path, major: u32, minor: u32) -> Result<()> {
@@ -160,4 +214,17 @@ fn mount_call(source: Option<&Path>, destination: &Path, flags: libc::c_ulong) -
         )
     })
     .with_context(|| format!("mount {}", destination.to_string_lossy()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::artifact_mode;
+
+    #[test]
+    fn mounted_artifact_modes_are_minimally_permissive() {
+        assert_eq!(artifact_mode(false, true), 0o400);
+        assert_eq!(artifact_mode(false, false), 0o600);
+        assert_eq!(artifact_mode(true, true), 0o500);
+        assert_eq!(artifact_mode(true, false), 0o700);
+    }
 }
