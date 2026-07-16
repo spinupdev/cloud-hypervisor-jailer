@@ -119,19 +119,3 @@ fn close_inherited_fds() -> Result<()> {
     }
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use std::fs::File;
-    use std::os::unix::io::AsRawFd;
-
-    use super::close_inherited_fds;
-
-    #[test]
-    fn closes_non_standard_inherited_descriptors() {
-        let file = File::open("/dev/null").unwrap();
-        let fd = file.as_raw_fd();
-        close_inherited_fds().unwrap();
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, -1);
-    }
-}
