@@ -26,6 +26,10 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
     jail::mount_resources(manifest)?;
     process::apply_limits(&manifest.resource_limits)?;
     let mut cgroup_lease = cgroup::setup(&manifest.cgroup, &manifest.machine_id)?;
+    // The jail deliberately has no /proc mount. Drop the bounding set while
+    // the host procfs is still available; this does not remove the current
+    // effective capabilities needed for pivot_root and device setup.
+    process::drop_capability_bounding_set()?;
     jail::pivot_into_jail(&manifest.root)?;
     jail::create_device_nodes(manifest.uid, manifest.gid)?;
     if let Some(netns) = netns {
@@ -43,7 +47,6 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
         }
     }
 
-    process::drop_capability_bounding_set()?;
     process::drop_privileges(manifest.uid, manifest.gid)?;
     process::sanitize_process()?;
     process::exec_cloud_hypervisor(&manifest.arguments)
