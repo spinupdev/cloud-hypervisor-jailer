@@ -234,20 +234,22 @@ fn setup_cgroup(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn apply_limits(manifest: &Manifest) -> Result<()> {
-    set_limit(libc::RLIMIT_NOFILE, manifest.resource_limits.no_file)?;
-    if let Some(file_size) = manifest.resource_limits.file_size {
-        set_limit(libc::RLIMIT_FSIZE, file_size)?;
-    }
-    Ok(())
+macro_rules! set_limit {
+    ($resource:expr, $value:expr) => {{
+        let limit = libc::rlimit {
+            rlim_cur: $value,
+            rlim_max: $value,
+        };
+        syscall_ok(unsafe { libc::setrlimit($resource, &limit) }).context("set resource limit")
+    }};
 }
 
-fn set_limit(resource: libc::__rlimit_resource_t, value: u64) -> Result<()> {
-    let limit = libc::rlimit {
-        rlim_cur: value,
-        rlim_max: value,
-    };
-    syscall_ok(unsafe { libc::setrlimit(resource, &limit) }).context("set resource limit")
+fn apply_limits(manifest: &Manifest) -> Result<()> {
+    set_limit!(libc::RLIMIT_NOFILE, manifest.resource_limits.no_file)?;
+    if let Some(file_size) = manifest.resource_limits.file_size {
+        set_limit!(libc::RLIMIT_FSIZE, file_size)?;
+    }
+    Ok(())
 }
 
 fn setns(fd: i32) -> Result<()> {
