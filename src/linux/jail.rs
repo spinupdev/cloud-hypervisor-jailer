@@ -70,10 +70,15 @@ pub(super) fn create_device_nodes(uid: u32, gid: u32) -> Result<()> {
     fs::create_dir_all("/dev/net").context("create jailed dev directory")?;
     create_character_device(Path::new("/dev/kvm"), 10, 232)?;
     create_character_device(Path::new("/dev/net/tun"), 10, 200)?;
+    // Cloud Hypervisor's default virtio-rng device reads from /dev/urandom.
+    // Expose only this non-blocking entropy device; guest workloads never
+    // receive the host /dev filesystem.
+    create_character_device(Path::new("/dev/urandom"), 1, 9)?;
     for path in [
         Path::new("/"),
         Path::new("/dev/kvm"),
         Path::new("/dev/net/tun"),
+        Path::new("/dev/urandom"),
     ] {
         chown_path(path, uid, gid).with_context(|| format!("chown {}", path.display()))?;
     }
