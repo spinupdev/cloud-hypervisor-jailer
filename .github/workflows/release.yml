@@ -8,21 +8,44 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-24.04
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
       - run: cargo test --all-features --locked
-      - run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: package release asset
         run: |
           mkdir dist
-          cp target/x86_64-unknown-linux-musl/release/cloud-hypervisor-jailer dist/
-          tar -C dist -czf cloud-hypervisor-jailer-x86_64-unknown-linux-musl.tar.gz cloud-hypervisor-jailer
-          sha256sum cloud-hypervisor-jailer-x86_64-unknown-linux-musl.tar.gz > cloud-hypervisor-jailer-x86_64-unknown-linux-musl.tar.gz.sha256
+          cp target/${{ matrix.target }}/release/cloud-hypervisor-jailer dist/
+          tar -C dist -czf cloud-hypervisor-jailer-${{ matrix.target }}.tar.gz cloud-hypervisor-jailer
+          sha256sum cloud-hypervisor-jailer-${{ matrix.target }}.tar.gz > cloud-hypervisor-jailer-${{ matrix.target }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            cloud-hypervisor-jailer-${{ matrix.target }}.tar.gz
+            cloud-hypervisor-jailer-${{ matrix.target }}.tar.gz.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
       - name: publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -30,5 +53,5 @@ jobs:
           gh release create "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes \
-            cloud-hypervisor-jailer-x86_64-unknown-linux-musl.tar.gz \
-            cloud-hypervisor-jailer-x86_64-unknown-linux-musl.tar.gz.sha256
+            ./*.tar.gz \
+            ./*.tar.gz.sha256

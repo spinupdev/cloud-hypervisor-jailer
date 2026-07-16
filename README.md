@@ -43,8 +43,8 @@ cargo build --release --locked
 cargo test --locked
 ```
 
-Release tags publish a Linux x86_64 musl binary and a SHA-256 checksum on
-GitHub Releases.
+Release tags publish Linux amd64 and arm64 musl binaries, each with a SHA-256
+checksum, on GitHub Releases.
 
 ## Manifest
 
