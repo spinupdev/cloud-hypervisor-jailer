@@ -50,6 +50,7 @@ struct Manifest {
     #[serde(default)]
     netns: Option<PathBuf>,
     #[serde(default)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     new_pid_namespace: bool,
     #[serde(default)]
     daemonize: bool,
@@ -78,6 +79,7 @@ struct ResourceLimits {
     #[serde(default = "default_nofile_limit")]
     no_file: u64,
     #[serde(default)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     file_size: Option<u64>,
 }
 
@@ -99,6 +101,7 @@ const fn default_nofile_limit() -> u64 {
 struct Mount {
     source: PathBuf,
     destination: SandboxPath,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     read_only: bool,
 }
 
