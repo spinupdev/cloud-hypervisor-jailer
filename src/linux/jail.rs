@@ -16,8 +16,13 @@ pub(super) fn prepare_root(manifest: &Manifest) -> Result<()> {
     fs::create_dir_all(&manifest.root).context("create jail root")?;
     fs::set_permissions(&manifest.root, fs::Permissions::from_mode(0o711))
         .context("restrict jail root")?;
+    let executable =
+        fs::canonicalize(&manifest.exec_file).context("canonicalize cloud-hypervisor")?;
+    if !executable.is_file() {
+        bail!("cloud-hypervisor executable is not a regular file");
+    }
     let target = manifest.root.join("cloud-hypervisor");
-    fs::copy(&manifest.exec_file, &target).context("copy cloud-hypervisor into jail")?;
+    fs::copy(executable, &target).context("copy cloud-hypervisor into jail")?;
     fs::set_permissions(&target, fs::Permissions::from_mode(0o500))
         .context("restrict cloud-hypervisor binary")?;
     chown_path(&target, manifest.uid, manifest.gid)?;
@@ -84,6 +89,8 @@ fn bind_mount(root: &Path, mount: &Mount) -> Result<()> {
             mount.source.display()
         )
     }
+    let source = fs::canonicalize(&mount.source)
+        .with_context(|| format!("canonicalize mount source {}", mount.source.display()))?;
     let destination = root.join(&mount.destination.0);
     let parent = destination
         .parent()
@@ -107,7 +114,7 @@ fn bind_mount(root: &Path, mount: &Mount) -> Result<()> {
     } else {
         0
     };
-    mount_call(Some(&mount.source), &destination, libc::MS_BIND | recursive)?;
+    mount_call(Some(&source), &destination, libc::MS_BIND | recursive)?;
     if mount.read_only {
         mount_call(
             None,

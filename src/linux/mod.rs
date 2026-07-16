@@ -25,7 +25,7 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
     jail::enter_mount_namespace()?;
     jail::mount_resources(manifest)?;
     process::apply_limits(&manifest.resource_limits)?;
-    cgroup::setup(&manifest.cgroup, &manifest.machine_id)?;
+    let mut cgroup_lease = cgroup::setup(&manifest.cgroup, &manifest.machine_id)?;
     jail::pivot_into_jail(&manifest.root)?;
     jail::create_device_nodes(manifest.uid, manifest.gid)?;
     if let Some(netns) = netns {
@@ -35,6 +35,9 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
     if manifest.new_pid_namespace {
         let pid = process::enter_pid_namespace()?;
         if pid > 0 {
+            if let Some(lease) = &mut cgroup_lease {
+                lease.retain();
+            }
             fs::write("/cloud-hypervisor.pid", format!("{pid}\n")).context("write CH pid")?;
             return Ok(());
         }

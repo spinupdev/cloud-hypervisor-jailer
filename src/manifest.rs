@@ -128,10 +128,10 @@ impl Manifest {
         if self.machine_id.len() > 64 {
             return Err(ManifestError::MachineIDTooLong);
         }
-        if !self.root.is_absolute() {
+        if !is_clean_absolute_host_path(&self.root) {
             return Err(ManifestError::RootNotAbsolute);
         }
-        if !self.exec_file.is_absolute()
+        if !is_clean_absolute_host_path(&self.exec_file)
             || !self
                 .exec_file
                 .file_name()
@@ -142,7 +142,11 @@ impl Manifest {
         if self.uid == 0 || self.gid == 0 {
             return Err(ManifestError::PrivilegedIdentity);
         }
-        if self.netns.as_ref().is_some_and(|path| !path.is_absolute()) {
+        if self
+            .netns
+            .as_ref()
+            .is_some_and(|path| !is_clean_absolute_host_path(path))
+        {
             return Err(ManifestError::NetNSNotAbsolute);
         }
         if !(3..=1_048_576).contains(&self.resource_limits.no_file) {
@@ -180,7 +184,7 @@ impl Manifest {
 
         let mut destinations = HashSet::new();
         for mount in &self.mounts {
-            if !mount.source.is_absolute() {
+            if !is_clean_absolute_host_path(&mount.source) {
                 return Err(ManifestError::SourceNotAbsolute(
                     mount.source.display().to_string(),
                 ));
@@ -193,6 +197,16 @@ impl Manifest {
         }
         Ok(())
     }
+}
+
+fn is_clean_absolute_host_path(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && !path.components().any(|component| {
+            matches!(
+                component,
+                Component::CurDir | Component::ParentDir | Component::Prefix(_)
+            )
+        })
 }
 
 fn validate_sandbox_path(path: &SandboxPath) -> Result<(), ManifestError> {
@@ -252,6 +266,16 @@ pub(crate) mod tests {
         assert!(matches!(
             manifest.validate(),
             Err(ManifestError::UnsafeSandboxPath(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_host_path_traversal() {
+        let mut manifest = valid_manifest();
+        manifest.exec_file = "/usr/bin/../bin/cloud-hypervisor".into();
+        assert!(matches!(
+            manifest.validate(),
+            Err(ManifestError::InvalidExecFile)
         ));
     }
 

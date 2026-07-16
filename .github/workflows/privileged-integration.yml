@@ -1,0 +1,24 @@
+name: privileged-integration
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: [self-hosted, linux, kvm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: assert privileged runner contract
+        run: |
+          test "$(id -u)" = 0
+          test -c /dev/kvm
+          test -f /sys/fs/cgroup/cgroup.controllers
+          test -w /sys/fs/cgroup/cgroup.subtree_control
+      - name: build jailer for the runner architecture
+        run: cargo build --release --locked
+      - name: explain required scenario suite
+        run: cat docs/testing.md

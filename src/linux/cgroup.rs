@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -10,9 +10,33 @@ use crate::manifest::Cgroup;
 
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-pub(super) fn setup(cgroup: &Cgroup, machine_id: &str) -> Result<()> {
+pub(super) struct Lease {
+    parent: PathBuf,
+    leaf: Option<PathBuf>,
+}
+
+impl Lease {
+    pub(super) fn retain(&mut self) {
+        self.leaf = None;
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(leaf) = self.leaf.take() else {
+            return;
+        };
+        let _ = fs::write(
+            self.parent.join("cgroup.procs"),
+            format!("{}\n", std::process::id()),
+        );
+        let _ = fs::remove_dir(&leaf);
+    }
+}
+
+pub(super) fn setup(cgroup: &Cgroup, machine_id: &str) -> Result<Option<Lease>> {
     if cgroup.values.is_empty() && cgroup.parent.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let root = Path::new(CGROUP_ROOT);
     if !root.join("cgroup.controllers").is_file() {
@@ -26,6 +50,10 @@ pub(super) fn setup(cgroup: &Cgroup, machine_id: &str) -> Result<()> {
     let parent_path = root.join(parent);
     let path = parent_path.join(machine_id);
     fs::create_dir_all(&path).with_context(|| format!("create cgroup {}", path.display()))?;
+    let lease = Lease {
+        parent: parent_path.clone(),
+        leaf: Some(path.clone()),
+    };
 
     let controllers = requested_controllers(&cgroup.values)?;
     for controller in controllers {
@@ -39,7 +67,8 @@ pub(super) fn setup(cgroup: &Cgroup, machine_id: &str) -> Result<()> {
         path.join("cgroup.procs"),
         format!("{}\n", std::process::id()),
     )
-    .context("join cgroup")
+    .context("join cgroup")?;
+    Ok(Some(lease))
 }
 
 fn requested_controllers(values: &BTreeMap<String, String>) -> Result<BTreeSet<&str>> {
@@ -102,5 +131,19 @@ mod tests {
             requested_controllers(&values).unwrap(),
             BTreeSet::from(["cpu", "memory"])
         );
+    }
+
+    #[test]
+    fn lease_removes_leaf_after_a_failed_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("parent");
+        let leaf = parent.join("machine-1");
+        fs::create_dir_all(&leaf).unwrap();
+        let lease = Lease {
+            parent,
+            leaf: Some(leaf.clone()),
+        };
+        drop(lease);
+        assert!(!leaf.exists());
     }
 }
