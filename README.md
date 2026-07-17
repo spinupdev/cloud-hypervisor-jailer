@@ -22,7 +22,9 @@ On Linux, `launch` requires root and then:
 - mounts only declared non-symlink sources;
 - joins a pre-created network namespace when requested;
 - configures the declared cgroup-v2 values and resource limits;
-- creates jailed KVM and TUN device nodes;
+- creates jailed KVM, TUN, and entropy device nodes;
+- recreates only explicitly declared canonical VFIO control/group character
+  devices, without bind-mounting host `/dev` or changing host device ownership;
 - creates a PID namespace when requested;
 - clears inherited environment and non-standard file descriptors;
 - drops the complete capability bounding set, sets `no_new_privs`, and changes
@@ -33,7 +35,7 @@ On Linux, `launch` requires root and then:
 flowchart LR
   O["Host orchestrator"] -->|"versioned JSON manifest"| V["validate"]
   V -->|"pure checks"| L["launch as root"]
-  L --> J["jail\nmount namespace • bind mounts • pivot_root • KVM/TUN"]
+  L --> J["jail\nmount namespace • bind mounts • pivot_root • KVM/TUN/VFIO"]
   L --> C["cgroup v2\ncontroller delegation • limits • lease"]
   L --> P["process\nnetns/PID ns • rlimits • FD/env cleanup • UID/GID"]
   J --> CH["Cloud Hypervisor\n--seccomp true"]
@@ -93,6 +95,14 @@ The manifest has a versioned, deny-unknown-fields schema. See the Rust types
 in [`src/manifest.rs`](src/manifest.rs) for the current canonical contract. Treat all
 paths and arguments as host-orchestrator-controlled inputs; this is not a
 safe interface for tenant-provided configuration.
+
+VFIO passthrough is opt-in per manifest. `devices` may contain only the exact
+control path `/dev/vfio/vfio` and canonical numeric IOMMU-group paths such as
+`/dev/vfio/42`; each destination must be the identical sandbox-relative path.
+Group entries require the control device. The jailer verifies every source is
+a real character device before pivoting and recreates its major/minor identity
+inside the private jail. Arbitrary host devices, symlinks, path aliases,
+destination remapping, duplicate nodes, and mounts over `dev/` are rejected.
 
 ## Status
 

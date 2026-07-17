@@ -26,6 +26,10 @@ release used by the consuming orchestrator:
    for reconciler retry.
 5. Create/restore a CH snapshot through the host orchestrator; verify the
    jailer does not broaden storage or device visibility.
+6. On a dedicated VFIO host, pass one complete IOMMU group and verify the VMM
+   sees only `/dev/vfio/vfio` plus that numeric group. Also verify arbitrary
+   devices, a second unassigned group, symlinks, and mounts over `/dev` fail
+   before Cloud Hypervisor execs.
 
 The workflow is deliberately manual until a hardened dedicated runner exists.
 Never run it on a shared developer host or a runner that also contains tenant
