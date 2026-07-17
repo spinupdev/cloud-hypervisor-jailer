@@ -17,8 +17,9 @@ JSON manifest -> manifest validation -> Linux launch workflow
   its pure invariants.
 - `src/linux/mod.rs` owns operation order. It has no low-level mount, cgroup,
   or credential details.
-- `src/linux/jail.rs` stages the root, applies declared bind mounts, performs
-  `pivot_root`, and creates only the KVM/TUN device nodes required by CH.
+- `src/linux/jail.rs` stages the root, applies declared bind mounts, resolves
+  allow-listed VFIO character identities, performs `pivot_root`, and creates
+  only the KVM/TUN/entropy and declared VFIO nodes required by CH.
 - `src/linux/cgroup.rs` owns cgroup-v2 discovery, controller delegation through
   `cgroup.subtree_control`, limit writes, and process attachment.
 - `src/linux/process.rs` owns namespaces, resource limits, descriptor and
@@ -38,8 +39,10 @@ Adopted or strengthened here:
 - strict versioned manifest rather than caller-provided arbitrary arguments;
 - bounded machine IDs, non-root target identity, path validation, and forced
   CH seccomp;
-- mount and PID namespaces, `pivot_root`, netns join, KVM/TUN nodes, rlimits,
-  cgroup-v2 limits, and descriptor/environment sanitization;
+- mount and PID namespaces, `pivot_root`, netns join, KVM/TUN/entropy nodes,
+  rlimits, cgroup-v2 limits, and descriptor/environment sanitization;
+- exact per-machine VFIO control/IOMMU-group allow-lists whose character
+  identities are recreated inside the jail instead of exposing host `/dev`;
 - cgroup-v2 controller availability checks and recursive delegation before a
   leaf cgroup is configured; and
 - `close_range` with an `ENOSYS` fallback, rather than an unconditional
@@ -52,8 +55,8 @@ Intentional differences:
 - the API socket is created by CH inside the jail, not passed as a listener FD
   or bind mounted from the host;
 - Firecracker-specific userfaultfd support is not exposed; and
-- `/dev/urandom` is not created because CH uses host randomness through the
-  kernel, not a jailed device path.
+- VFIO groups are supplied by the host allocator; this launcher validates the
+  boundary but does not discover devices or decide assignment policy.
 
 ## Remaining hardening work
 

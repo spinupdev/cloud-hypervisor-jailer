@@ -3,12 +3,14 @@
 use std::env;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::manifest::{Manifest, Mount};
+use crate::manifest::{Device, Manifest, Mount};
 
 use super::util::{c_path, syscall_ok};
 
@@ -49,6 +51,50 @@ pub(super) fn mount_resources(manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug)]
+pub(super) struct ResolvedDevice {
+    destination: std::path::PathBuf,
+    major: u32,
+    minor: u32,
+}
+
+/// Resolve the device identity while the host `/dev` tree is still visible.
+/// Manifest validation has already constrained every path to canonical VFIO
+/// names; this second check proves each selected entry is a real character
+/// device rather than trusting a regular file at an allowed-looking path.
+pub(super) fn resolve_devices(manifest: &Manifest) -> Result<Vec<ResolvedDevice>> {
+    manifest
+        .devices
+        .iter()
+        .map(resolve_device)
+        .collect::<Result<Vec<_>>>()
+}
+
+fn resolve_device(device: &Device) -> Result<ResolvedDevice> {
+    let metadata = fs::symlink_metadata(&device.source)
+        .with_context(|| format!("stat device source {}", device.source.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_char_device() {
+        bail!(
+            "device source is not a character device: {}",
+            device.source.display()
+        );
+    }
+    let canonical = fs::canonicalize(&device.source)
+        .with_context(|| format!("canonicalize device source {}", device.source.display()))?;
+    if canonical != device.source {
+        bail!(
+            "device source changed during resolution: {}",
+            device.source.display()
+        );
+    }
+    let device_id = metadata.rdev();
+    Ok(ResolvedDevice {
+        destination: device.destination.0.clone(),
+        major: libc::major(device_id) as u32,
+        minor: libc::minor(device_id) as u32,
+    })
+}
+
 pub(super) fn pivot_into_jail(root: &Path) -> Result<()> {
     mount_call(Some(root), root, libc::MS_BIND | libc::MS_REC)?;
     env::set_current_dir(root).context("enter jail root")?;
@@ -66,14 +112,24 @@ pub(super) fn pivot_into_jail(root: &Path) -> Result<()> {
     syscall_ok(unsafe { libc::rmdir(old_root.as_ptr()) }).context("remove old root")
 }
 
-pub(super) fn create_device_nodes(uid: u32, gid: u32) -> Result<()> {
+pub(super) fn create_device_nodes(uid: u32, gid: u32, devices: &[ResolvedDevice]) -> Result<()> {
     fs::create_dir_all("/dev/net").context("create jailed dev directory")?;
+    if !devices.is_empty() {
+        fs::create_dir_all("/dev/vfio").context("create jailed VFIO directory")?;
+    }
     create_character_device(Path::new("/dev/kvm"), 10, 232)?;
     create_character_device(Path::new("/dev/net/tun"), 10, 200)?;
     // Cloud Hypervisor's default virtio-rng device reads from /dev/urandom.
     // Expose only this non-blocking entropy device; guest workloads never
     // receive the host /dev filesystem.
     create_character_device(Path::new("/dev/urandom"), 1, 9)?;
+    for device in devices {
+        let destination = Path::new("/").join(&device.destination);
+        create_character_device(&destination, device.major, device.minor)
+            .with_context(|| format!("create jailed device {}", destination.display()))?;
+        chown_path(&destination, uid, gid)
+            .with_context(|| format!("chown jailed device {}", destination.display()))?;
+    }
     for path in [
         Path::new("/"),
         Path::new("/dev/kvm"),

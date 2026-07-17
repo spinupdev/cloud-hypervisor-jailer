@@ -33,6 +33,8 @@ pub(crate) struct Manifest {
     pub(crate) resource_limits: ResourceLimits,
     pub(crate) api_socket: SandboxPath,
     pub(crate) mounts: Vec<Mount>,
+    #[serde(default)]
+    pub(crate) devices: Vec<Device>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -76,6 +78,18 @@ pub(crate) struct Mount {
     pub(crate) read_only: bool,
 }
 
+/// A host device that may be recreated inside the jail.
+///
+/// The v1 contract deliberately limits this to VFIO. The launcher resolves
+/// the character-device identity from the trusted host path before pivoting;
+/// it never bind-mounts the host `/dev` tree or changes host device ownership.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Device {
+    pub(crate) source: PathBuf,
+    pub(crate) destination: SandboxPath,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(transparent)]
 pub(crate) struct SandboxPath(pub(crate) PathBuf);
@@ -102,6 +116,18 @@ pub(crate) enum ManifestError {
     SourceNotAbsolute(String),
     #[error("duplicate sandbox destination {0}")]
     DuplicateDestination(String),
+    #[error("mount destination {0} overlaps the jailer's reserved device tree")]
+    ReservedMountDestination(String),
+    #[error("device source {0} is not an allow-listed VFIO path")]
+    InvalidDeviceSource(String),
+    #[error("VFIO device destination must match its source: {0}")]
+    InvalidDeviceDestination(String),
+    #[error("duplicate VFIO device {0}")]
+    DuplicateDevice(String),
+    #[error("VFIO group devices require the /dev/vfio/vfio control device")]
+    MissingVFIOControlDevice,
+    #[error("a jail may contain at most 65 VFIO devices")]
+    TooManyDevices,
     #[error("resource limit no_file must be between 3 and 1048576")]
     InvalidNoFileLimit,
     #[error("cgroup property {0} is not an allow-listed cgroup v2 file")]
@@ -191,12 +217,78 @@ impl Manifest {
             }
             validate_sandbox_path(&mount.destination)?;
             let destination = mount.destination.0.display().to_string();
+            if mount.destination.0.starts_with("dev") {
+                return Err(ManifestError::ReservedMountDestination(destination));
+            }
             if !destinations.insert(destination.clone()) {
                 return Err(ManifestError::DuplicateDestination(destination));
             }
         }
+        if self.devices.len() > 65 {
+            return Err(ManifestError::TooManyDevices);
+        }
+        let mut devices = HashSet::new();
+        let mut has_control = false;
+        let mut has_group = false;
+        for device in &self.devices {
+            let source = validate_vfio_source(&device.source)?;
+            let expected_destination = source
+                .strip_prefix("/")
+                .expect("validated VFIO source is absolute");
+            validate_sandbox_path(&device.destination)?;
+            if device.destination.0 != expected_destination {
+                return Err(ManifestError::InvalidDeviceDestination(
+                    device.destination.0.display().to_string(),
+                ));
+            }
+            if !devices.insert(source.to_owned()) {
+                return Err(ManifestError::DuplicateDevice(source.display().to_string()));
+            }
+            if !destinations.insert(device.destination.0.display().to_string()) {
+                return Err(ManifestError::DuplicateDestination(
+                    device.destination.0.display().to_string(),
+                ));
+            }
+            if source == std::path::Path::new("/dev/vfio/vfio") {
+                has_control = true;
+            } else {
+                has_group = true;
+            }
+        }
+        if has_group && !has_control {
+            return Err(ManifestError::MissingVFIOControlDevice);
+        }
         Ok(())
     }
+}
+
+fn validate_vfio_source(path: &std::path::Path) -> Result<&std::path::Path, ManifestError> {
+    if !is_clean_absolute_host_path(path) {
+        return Err(ManifestError::InvalidDeviceSource(
+            path.display().to_string(),
+        ));
+    }
+    if path == std::path::Path::new("/dev/vfio/vfio") {
+        return Ok(path);
+    }
+    let Some(group) = path
+        .strip_prefix("/dev/vfio")
+        .ok()
+        .and_then(|relative| relative.to_str())
+    else {
+        return Err(ManifestError::InvalidDeviceSource(
+            path.display().to_string(),
+        ));
+    };
+    if group.is_empty()
+        || !group.bytes().all(|byte| byte.is_ascii_digit())
+        || (group.len() > 1 && group.starts_with('0'))
+    {
+        return Err(ManifestError::InvalidDeviceSource(
+            path.display().to_string(),
+        ));
+    }
+    Ok(path)
 }
 
 fn is_clean_absolute_host_path(path: &std::path::Path) -> bool {
@@ -251,6 +343,7 @@ pub(crate) mod tests {
             resource_limits: ResourceLimits::default(),
             api_socket: SandboxPath("run/ch.sock".into()),
             mounts: vec![],
+            devices: vec![],
         }
     }
 
@@ -313,6 +406,79 @@ pub(crate) mod tests {
         assert!(matches!(
             manifest.validate(),
             Err(ManifestError::PrivilegedIdentity)
+        ));
+    }
+
+    #[test]
+    fn accepts_exact_vfio_control_and_group_devices() {
+        let mut manifest = valid_manifest();
+        manifest.devices = vec![
+            Device {
+                source: "/dev/vfio/vfio".into(),
+                destination: SandboxPath("dev/vfio/vfio".into()),
+            },
+            Device {
+                source: "/dev/vfio/42".into(),
+                destination: SandboxPath("dev/vfio/42".into()),
+            },
+        ];
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn rejects_arbitrary_devices_and_vfio_path_aliases() {
+        for source in [
+            "/dev/null",
+            "/dev/vfio/../../mem",
+            "/dev/vfio/01",
+            "/dev/vfio/1/2",
+        ] {
+            let mut manifest = valid_manifest();
+            manifest.devices = vec![Device {
+                source: source.into(),
+                destination: SandboxPath("dev/vfio/1".into()),
+            }];
+            assert!(matches!(
+                manifest.validate(),
+                Err(ManifestError::InvalidDeviceSource(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_destination_remapping_and_missing_control_device() {
+        let mut manifest = valid_manifest();
+        manifest.devices = vec![Device {
+            source: "/dev/vfio/42".into(),
+            destination: SandboxPath("dev/vfio/41".into()),
+        }];
+        assert!(matches!(
+            manifest.validate(),
+            Err(ManifestError::InvalidDeviceDestination(_))
+        ));
+
+        let mut manifest = valid_manifest();
+        manifest.devices = vec![Device {
+            source: "/dev/vfio/42".into(),
+            destination: SandboxPath("dev/vfio/42".into()),
+        }];
+        assert!(matches!(
+            manifest.validate(),
+            Err(ManifestError::MissingVFIOControlDevice)
+        ));
+    }
+
+    #[test]
+    fn rejects_mounts_over_the_reserved_device_tree() {
+        let mut manifest = valid_manifest();
+        manifest.mounts = vec![Mount {
+            source: "/var/lib/machined/device-shadow".into(),
+            destination: SandboxPath("dev/vfio".into()),
+            read_only: false,
+        }];
+        assert!(matches!(
+            manifest.validate(),
+            Err(ManifestError::ReservedMountDestination(_))
         ));
     }
 }

@@ -20,6 +20,7 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
         .map(File::open)
         .transpose()
         .context("open network namespace")?;
+    let devices = jail::resolve_devices(manifest)?;
 
     jail::prepare_root(manifest)?;
     jail::enter_mount_namespace()?;
@@ -31,7 +32,7 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
     // effective capabilities needed for pivot_root and device setup.
     process::drop_capability_bounding_set()?;
     jail::pivot_into_jail(&manifest.root)?;
-    jail::create_device_nodes(manifest.uid, manifest.gid)?;
+    jail::create_device_nodes(manifest.uid, manifest.gid, &devices)?;
     if let Some(netns) = netns {
         process::join_network_namespace(netns.as_raw_fd())?;
     }
