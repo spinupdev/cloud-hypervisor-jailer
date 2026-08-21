@@ -21,6 +21,7 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
         .transpose()
         .context("open network namespace")?;
     let devices = jail::resolve_devices(manifest)?;
+    let userfaultfd = jail::resolve_userfaultfd()?;
 
     jail::prepare_root(manifest)?;
     jail::enter_mount_namespace()?;
@@ -32,7 +33,7 @@ pub(crate) fn launch(manifest: &Manifest) -> Result<()> {
     // effective capabilities needed for pivot_root and device setup.
     process::drop_capability_bounding_set()?;
     jail::pivot_into_jail(&manifest.root)?;
-    jail::create_device_nodes(manifest.uid, manifest.gid, &devices)?;
+    jail::create_device_nodes(manifest.uid, manifest.gid, &devices, userfaultfd.as_ref())?;
     if let Some(netns) = netns {
         process::join_network_namespace(netns.as_raw_fd())?;
     }
