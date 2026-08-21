@@ -70,6 +70,31 @@ pub(super) fn resolve_devices(manifest: &Manifest) -> Result<Vec<ResolvedDevice>
         .collect::<Result<Vec<_>>>()
 }
 
+const USERFAULTFD_PATH: &str = "/dev/userfaultfd";
+
+/// Resolve the host `/dev/userfaultfd` identity before pivot, if the node
+/// has one. Cloud Hypervisor OnDemand restore tries this device first, then
+/// the `userfaultfd(2)` syscall. Recreating the character device inside the
+/// jail (owned by the unprivileged VMM) is the narrow grant upstream
+/// recommends, instead of `vm.unprivileged_userfaultfd=1` for every process.
+pub(super) fn resolve_userfaultfd() -> Result<Option<ResolvedDevice>> {
+    match fs::symlink_metadata(USERFAULTFD_PATH) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).context("stat /dev/userfaultfd"),
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_char_device() {
+                bail!("/dev/userfaultfd is not a character device");
+            }
+            let device_id = metadata.rdev();
+            Ok(Some(ResolvedDevice {
+                destination: std::path::PathBuf::from("dev/userfaultfd"),
+                major: libc::major(device_id) as u32,
+                minor: libc::minor(device_id) as u32,
+            }))
+        }
+    }
+}
+
 fn resolve_device(device: &Device) -> Result<ResolvedDevice> {
     let metadata = fs::symlink_metadata(&device.source)
         .with_context(|| format!("stat device source {}", device.source.display()))?;
@@ -112,7 +137,12 @@ pub(super) fn pivot_into_jail(root: &Path) -> Result<()> {
     syscall_ok(unsafe { libc::rmdir(old_root.as_ptr()) }).context("remove old root")
 }
 
-pub(super) fn create_device_nodes(uid: u32, gid: u32, devices: &[ResolvedDevice]) -> Result<()> {
+pub(super) fn create_device_nodes(
+    uid: u32,
+    gid: u32,
+    devices: &[ResolvedDevice],
+    userfaultfd: Option<&ResolvedDevice>,
+) -> Result<()> {
     fs::create_dir_all("/dev/net").context("create jailed dev directory")?;
     if !devices.is_empty() {
         fs::create_dir_all("/dev/vfio").context("create jailed VFIO directory")?;
@@ -123,6 +153,12 @@ pub(super) fn create_device_nodes(uid: u32, gid: u32, devices: &[ResolvedDevice]
     // Expose only this non-blocking entropy device; guest workloads never
     // receive the host /dev filesystem.
     create_character_device(Path::new("/dev/urandom"), 1, 9)?;
+    if let Some(device) = userfaultfd {
+        create_character_device(Path::new("/dev/userfaultfd"), device.major, device.minor)
+            .context("create jailed /dev/userfaultfd")?;
+        chown_path(Path::new("/dev/userfaultfd"), uid, gid)
+            .context("chown jailed /dev/userfaultfd")?;
+    }
     for device in devices {
         let destination = Path::new("/").join(&device.destination);
         create_character_device(&destination, device.major, device.minor)
@@ -280,6 +316,7 @@ fn mount_call(source: Option<&Path>, destination: &Path, flags: libc::c_ulong) -
 #[cfg(test)]
 mod tests {
     use super::artifact_mode;
+    use super::resolve_userfaultfd;
 
     #[test]
     fn mounted_artifact_modes_are_minimally_permissive() {
@@ -287,5 +324,20 @@ mod tests {
         assert_eq!(artifact_mode(false, false), 0o600);
         assert_eq!(artifact_mode(true, true), 0o500);
         assert_eq!(artifact_mode(true, false), 0o700);
+    }
+
+    #[test]
+    fn resolve_userfaultfd_is_optional_when_the_host_has_no_device() {
+        match resolve_userfaultfd() {
+            Ok(None) => {}
+            Ok(Some(device)) => {
+                assert_eq!(
+                    device.destination,
+                    std::path::PathBuf::from("dev/userfaultfd")
+                );
+                assert!(device.major > 0 || device.minor > 0);
+            }
+            Err(err) => panic!("resolve_userfaultfd: {err}"),
+        }
     }
 }

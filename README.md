@@ -22,7 +22,9 @@ On Linux, `launch` requires root and then:
 - mounts only declared non-symlink sources;
 - joins a pre-created network namespace when requested;
 - configures the declared cgroup-v2 values and resource limits;
-- creates jailed KVM, TUN, and entropy device nodes;
+- creates jailed KVM, TUN, entropy, and (when the host has it) userfaultfd
+  device nodes so Cloud Hypervisor OnDemand restore can create a uffd without
+  `vm.unprivileged_userfaultfd=1`;
 - recreates only explicitly declared canonical VFIO control/group character
   devices, without bind-mounting host `/dev` or changing host device ownership;
 - creates a PID namespace when requested;
@@ -35,7 +37,7 @@ On Linux, `launch` requires root and then:
 flowchart LR
   O["Host orchestrator"] -->|"versioned JSON manifest"| V["validate"]
   V -->|"pure checks"| L["launch as root"]
-  L --> J["jail\nmount namespace • bind mounts • pivot_root • KVM/TUN/VFIO"]
+  L --> J["jail\nmount namespace • bind mounts • pivot_root • KVM/TUN/userfaultfd/VFIO"]
   L --> C["cgroup v2\ncontroller delegation • limits • lease"]
   L --> P["process\nnetns/PID ns • rlimits • FD/env cleanup • UID/GID"]
   J --> CH["Cloud Hypervisor\n--seccomp true"]

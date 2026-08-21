@@ -19,7 +19,7 @@ JSON manifest -> manifest validation -> Linux launch workflow
   or credential details.
 - `src/linux/jail.rs` stages the root, applies declared bind mounts, resolves
   allow-listed VFIO character identities, performs `pivot_root`, and creates
-  only the KVM/TUN/entropy and declared VFIO nodes required by CH.
+  only the KVM/TUN/entropy/userfaultfd and declared VFIO nodes required by CH.
 - `src/linux/cgroup.rs` owns cgroup-v2 discovery, controller delegation through
   `cgroup.subtree_control`, limit writes, and process attachment.
 - `src/linux/process.rs` owns namespaces, resource limits, descriptor and
@@ -54,7 +54,9 @@ Intentional differences:
   process, logs, and durable PID directly;
 - the API socket is created by CH inside the jail, not passed as a listener FD
   or bind mounted from the host;
-- Firecracker-specific userfaultfd support is not exposed; and
+- Cloud Hypervisor OnDemand restore needs `/dev/userfaultfd` inside the jail
+  (recreated from the host character identity, owned by the unprivileged VMM).
+  Firecracker's external uffd-handler is out of scope for this launcher; and
 - VFIO groups are supplied by the host allocator; this launcher validates the
   boundary but does not discover devices or decide assignment policy.
 
